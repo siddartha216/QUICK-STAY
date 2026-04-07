@@ -1,7 +1,8 @@
 import Booking from "../models/Booking.js";
 import Room from "../models/Room.js";
 import Hotel from "../models/Hotel.js";
-import transporter from "../configs/nodemailer.js";
+import { getUserEmail } from "../utils/getUserEmail.js";
+import sendEmail from "../utils/sendEmail.js";
 
 
 // ================= INTERNAL FUNCTION =================
@@ -32,10 +33,10 @@ export const checkRoomAvailability = async (req, res) => {
       room
     });
 
-    res.json({ success:true, isAvailable });
+    res.json({ success: true, isAvailable });
 
   } catch (error) {
-    res.json({ success:false, message:error.message });
+    res.json({ success: false, message: error.message });
   }
 };
 
@@ -47,7 +48,8 @@ export const createBooking = async (req, res) => {
   try {
 
     const { room, checkInDate, checkOutDate, guests } = req.body;
-    const user = req.userId;
+
+    const user = req.auth.userId;
 
     const isAvailable = await checkAvailability({
       checkInDate,
@@ -57,15 +59,15 @@ export const createBooking = async (req, res) => {
 
     if (!isAvailable) {
       return res.json({
-        success:false,
-        message:"Room is not available for the selected dates"
+        success: false,
+        message: "Room is not available for the selected dates"
       });
     }
 
     const roomData = await Room.findById(room).populate("hotel");
 
     if (!roomData) {
-      return res.json({ success:false, message:"Room not found" });
+      return res.json({ success: false, message: "Room not found" });
     }
 
     const checkIn = new Date(checkInDate);
@@ -88,89 +90,111 @@ export const createBooking = async (req, res) => {
     });
 
     // ================= EMAIL =================
-    const mailOptions = {
-      from: process.env.SENDER_EMAIL,
-      to: process.env.SMTP_USER,   // change later to real user email if needed
-      subject: "Booking Confirmation",
-      html: `
-        <h2>Booking Confirmed</h2>
-        <p><b>Hotel:</b> ${roomData.hotel.name}</p>
-        <p><b>Location:</b> ${roomData.hotel.address}</p>
-        <p><b>Total:</b> ${totalPrice}</p>
-      `
-    };
-
     try {
-      await transporter.sendMail(mailOptions);
-      console.log("EMAIL SENT");
+      const userEmail = await getUserEmail(user);
+
+      await sendEmail(
+        userEmail,
+        "Booking Confirmation",
+        `
+Booking Confirmed!
+
+Hotel: ${roomData.hotel.name}
+Location: ${roomData.hotel.address}
+Guests: ${guests}
+Check-in: ${checkInDate}
+Check-out: ${checkOutDate}
+Total Price: ₹${totalPrice}
+
+Thank you for booking with us!
+`
+      );
+
+      console.log("✅ Email sent");
+
     } catch (mailErr) {
-      console.log("EMAIL FAILED:", mailErr.message);
+      console.log("❌ EMAIL FAILED:", mailErr.message);
     }
 
     res.json({
-      success:true,
-      message:"Booking created successfully",
+      success: true,
+      message: "Booking created successfully",
       booking
     });
 
   } catch (error) {
-    res.json({ success:false, message:error.message });
+    res.json({ success: false, message: error.message });
   }
 };
 
 
 
-// ================= 🔥 USER BOOKINGS (THIS WAS MISSING) =================
+// ================= USER BOOKINGS =================
 export const getUserBookings = async (req, res) => {
 
   try {
 
-    const bookings = await Booking.find({ user:req.userId })
+    const bookings = await Booking.find({ user: req.auth.userId })
       .populate("room hotel")
-      .sort({ createdAt:-1 });
+      .sort({ createdAt: -1 });
 
-    res.json({ success:true, bookings });
+    res.json({ success: true, bookings });
 
   } catch (error) {
-    res.json({ success:false, message:"Failed to fetch bookings" });
+    res.json({ success: false, message: "Failed to fetch bookings" });
   }
 
 };
 
 
 
-// ================= OWNER BOOKINGS =================
+// ================= OWNER DASHBOARD BOOKINGS =================
 export const getHotelBookings = async (req, res) => {
 
   try {
 
-    const hotel = await Hotel.findOne({ owner:req.userId });
+    const hotel = await Hotel.findOne({ owner: req.auth.userId });
 
     if (!hotel) {
-      return res.json({ success:false, message:"Hotel not found" });
+      return res.json({ success: false, message: "Hotel not found" });
     }
 
-    const bookings = await Booking.find({ hotel:hotel._id })
-      .populate("room hotel user")
-      .sort({ createdAt:-1 });
+    const bookings = await Booking.find({ hotel: hotel._id })
+      .populate("room hotel")
+      .sort({ createdAt: -1 });
 
-    const totalBookings = bookings.length;
+    // 🔥 FIX: attach user email
+    const updatedBookings = await Promise.all(
+      bookings.map(async (booking) => {
+        const email = await getUserEmail(booking.user);
 
-    const totalRevenue = bookings.reduce(
-      (acc,b)=> acc + b.totalPrice, 0
+        return {
+          ...booking._doc,
+          user: {
+            email
+          }
+        };
+      })
+    );
+
+    const totalBookings = updatedBookings.length;
+
+    const totalRevenue = updatedBookings.reduce(
+      (acc, b) => acc + b.totalPrice,
+      0
     );
 
     res.json({
-      success:true,
-      dashboardData:{
+      success: true,
+      dashboardData: {
         totalBookings,
         totalRevenue,
-        bookings
+        bookings: updatedBookings.slice(0, 5)
       }
     });
 
   } catch (error) {
-    res.json({ success:false, message:"Failed to fetch bookings" });
+    res.json({ success: false, message: "Failed to fetch bookings" });
   }
 
 };
